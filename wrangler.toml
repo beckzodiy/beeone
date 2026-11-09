@@ -1,0 +1,20 @@
+name = "mommy-knows-shop"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# Mini app HTML is inlined into the Worker (see src/index.js); /api/* and /webhook go to the Worker too.
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mommy-knows-db"
+database_id = "48f61c19-7df4-4dc9-91cf-992c10c9de5d"
+
+[vars]
+ADMIN_ID = "5092483247"
+BOT_USERNAME = "beeone_orderbot"
+PUBLIC_URL = "https://mommy-knows-shop.beckzodiy.workers.dev"
+COMMISSION_PERCENT = "10"
+
+# Secrets (set with `npx wrangler secret put NAME`):
+#   BOT_TOKEN       - from @BotFather
+#   WEBHOOK_SECRET  - any random string (A-Z a-z 0-9 _ -), protects /webhook and /setup

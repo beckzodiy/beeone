@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Mommy Knows</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#fff8f2; --card:#ffffff; --ink:#3a2c2a; --muted:#8a7a74; --line:#f1e4da;
+  --brand:#3d2ce5; --brand-ink:#fff; --soft:#ffe9ec; --mint:#d9f3ea; --mint-ink:#1f7a5a;
+  --sun:#fff1c9; --shadow:0 6px 20px rgba(120,60,40,.08);
+}
+:root[data-theme="dark"]{
+  --bg:#1c1716; --card:#271f1d; --ink:#f6ebe6; --muted:#b3a29b; --line:#3a2f2c;
+  --brand:#7265f5; --soft:#3a2427; --mint:#1d3a30; --mint-ink:#8fe3c2; --sun:#3b3220; --shadow:none;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{font-family:Nunito,system-ui,sans-serif;background:var(--bg);color:var(--ink);padding-bottom:110px;min-height:100vh}
+h1,h2,.num{font-family:Fraunces,Georgia,serif}
+.wrap{max-width:560px;margin:0 auto;padding:0 16px}
+header{padding:22px 0 8px;display:flex;align-items:center;gap:12px}
+.logo{width:46px;height:46px;border-radius:14px;background:var(--brand);display:grid;place-items:center;font-size:24px}
+header h1{font-size:24px;line-height:1}
+header p{color:var(--muted);font-size:13px;margin-top:4px}
+.hero{margin:14px 0;border-radius:22px;padding:18px;background:linear-gradient(135deg,var(--soft),var(--sun));position:relative;overflow:hidden}
+.hero b{font-family:Fraunces,serif;font-size:30px;display:block}
+.hero span{font-size:14px;color:var(--muted)}
+.hero .tag{position:absolute;right:16px;top:16px;background:var(--card);border-radius:999px;padding:6px 10px;font-size:12px;font-weight:700}
+.tabs{display:flex;gap:6px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:4px;margin:6px 0 14px;position:sticky;top:8px;z-index:5}
+.tabs button{flex:1;border:0;background:none;padding:10px;border-radius:10px;font:700 14px Nunito;color:var(--muted)}
+.tabs button.on{background:var(--brand);color:var(--brand-ink)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.section-title{font-family:Fraunces,serif;font-size:18px;margin:18px 0 10px}
+.section-title:first-child{margin-top:0}
+.p{background:var(--card);border-radius:18px;padding:14px;box-shadow:var(--shadow);border:1px solid var(--line);display:flex;flex-direction:column}
+.p .em{font-size:34px;width:56px;height:56px;border-radius:16px;background:var(--soft);display:grid;place-items:center;margin-bottom:10px}
+.p .pimg{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:16px;background:var(--soft);margin-bottom:10px}
+.p h3{font-size:15px}
+.p small{color:var(--muted);font-size:12px;min-height:16px}
+.p .price{font-family:Fraunces,serif;font-size:18px;margin:8px 0}
+.step{display:flex;align-items:center;justify-content:space-between;background:var(--bg);border-radius:12px;padding:4px;margin-top:auto}
+.step button{width:34px;height:34px;border:0;border-radius:10px;background:var(--card);color:var(--ink);font:800 18px Nunito;box-shadow:var(--shadow)}
+.step button.add{width:100%;background:var(--brand);color:var(--brand-ink);font-size:14px}
+.step b{min-width:24px;text-align:center}
+.bar{position:fixed;left:0;right:0;bottom:0;padding:12px 16px calc(12px + env(safe-area-inset-bottom));background:linear-gradient(transparent,var(--bg) 30%)}
+.bar button{width:100%;max-width:528px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;border:0;border-radius:16px;padding:16px 18px;background:var(--brand);color:var(--brand-ink);font:800 16px Nunito}
+.hide{display:none!important}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:16px;box-shadow:var(--shadow);margin-bottom:12px}
+label{display:block;font-size:13px;font-weight:700;margin:12px 0 6px}
+input,textarea{width:100%;border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:12px;padding:12px;font:16px Nunito}
+.row{display:flex;justify-content:space-between;gap:10px;padding:6px 0;font-size:14px}
+.row.t{border-top:1px dashed var(--line);margin-top:6px;padding-top:10px;font-weight:800}
+.btn{width:100%;border:0;border-radius:14px;padding:14px;background:var(--brand);color:var(--brand-ink);font:800 15px Nunito;margin-top:14px}
+.btn.ghost{background:var(--soft);color:var(--ink)}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0}
+.stat{background:var(--bg);border-radius:14px;padding:12px}
+.stat .num{font-size:22px}
+.stat small{color:var(--muted);font-size:12px}
+.stat.big{grid-column:1/-1;background:var(--mint);color:var(--mint-ink)}
+.stat.big .num{font-size:30px}
+.link{display:flex;gap:8px;align-items:center;background:var(--bg);border-radius:12px;padding:10px;margin-top:8px;font-size:13px;word-break:break-all}
+.link button{flex:none;border:0;border-radius:10px;padding:8px 10px;background:var(--ink);color:var(--bg);font:700 12px Nunito}
+.pill{font-size:11px;font-weight:800;border-radius:999px;padding:3px 8px;text-transform:uppercase}
+.pending,.confirmed{background:var(--sun)} .delivered{background:var(--mint);color:var(--mint-ink)} .cancelled{background:var(--soft)}
+.muted{color:var(--muted);font-size:14px}
+.sheet{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:flex-end;z-index:20}
+.sheet .in{background:var(--card);width:100%;max-width:560px;margin:0 auto;border-radius:24px 24px 0 0;padding:20px 16px calc(20px + env(safe-area-inset-bottom));max-height:92vh;overflow:auto}
+.toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:12px;font-weight:700;z-index:30}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">👶</div>
+    <div><h1>Mommy Knows</h1><p>Baby care, delivered in the UAE</p></div>
+  </header>
+
+  <div class="tabs">
+    <button data-tab="shop" class="on">Shop</button>
+    <button data-tab="orders">My orders</button>
+    <button data-tab="earn">Earn 10%</button>
+  </div>
+
+  <section id="shop">
+    <div class="hero"><span class="tag">Cash on delivery</span><span>Every pack</span><b>59.99 AED</b><span>Diaper Tape · Diaper Pants</span></div>
+    <div id="grid"></div>
+  </section>
+
+  <section id="orders" class="hide"></section>
+  <section id="earn" class="hide"></section>
+</div>
+
+<div class="bar hide" id="bar"><button id="checkoutBtn"><span id="barCount"></span><span id="barTotal"></span></button></div>
+
+<div class="sheet hide" id="sheet"><div class="in">
+  <h2>Checkout</h2>
+  <div id="summary" style="margin-top:12px"></div>
+  <label>Name</label><input id="f_name" autocomplete="name">
+  <label>Phone (WhatsApp)</label><input id="f_phone" type="tel" placeholder="+971 50 123 4567" autocomplete="tel">
+  <label>Delivery address</label><textarea id="f_addr" rows="2" placeholder="Emirate, area, building, flat"></textarea>
+  <label>Note (optional)</label><input id="f_note">
+  <button class="btn" id="placeBtn">Place order</button>
+  <button class="btn ghost" id="closeSheet">Back</button>
+</div></div>
+
+<script>
+const tg = window.Telegram?.WebApp;
+const inTG = !!tg?.initData;
+if (tg) { tg.ready(); tg.expand(); }
+const dark = tg?.colorScheme === 'dark' || (!inTG && matchMedia('(prefers-color-scheme: dark)').matches);
+if (dark) document.documentElement.dataset.theme = 'dark';
+
+const $ = (s) => document.querySelector(s);
+const aed = (f) => (f / 100).toFixed(2) + ' AED';
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const toast = (t) => { const d = document.createElement('div'); d.className = 'toast'; d.textContent = t; document.body.append(d); setTimeout(() => d.remove(), 2500); };
+const haptic = () => tg?.HapticFeedback?.impactOccurred?.('light');
+
+// --- referral: ?ref= in URL (website links) or start_param (Telegram) ---
+const store = { get(k){ try { return localStorage.getItem(k) } catch { return null } }, set(k,v){ try { localStorage.setItem(k,v) } catch {} } };
+const urlRef = new URLSearchParams(location.search).get('ref');
+if (urlRef && !store.get('mk_ref')) store.set('mk_ref', urlRef.toUpperCase());
+if (urlRef && !sessionStorage.getItem('mk_clicked')) { try { sessionStorage.setItem('mk_clicked', 1) } catch {} fetch('/api/click', { method: 'POST', body: JSON.stringify({ ref: urlRef }) }); }
+const REF = store.get('mk_ref') || tg?.initDataUnsafe?.start_param || null;
+
+const api = (path, body) => fetch(path, {
+  method: body ? 'POST' : 'GET',
+  headers: { 'content-type': 'application/json', 'X-Init-Data': tg?.initData || '' },
+  body: body ? JSON.stringify(body) : undefined,
+}).then(async (r) => ({ ok: r.ok, ...(await r.json().catch(() => ({}))) }));
+
+let PRODUCTS = [], BOT = '', COMM = 10;
+const cart = {};
+
+function renderShop() {
+  const cats = [...new Set(PRODUCTS.map((p) => p.category || ''))];
+  $('#grid').innerHTML = cats.map((cat) => `
+    ${cat ? `<div class="section-title">${esc(cat)}</div>` : ''}
+    <div class="grid">
+      ${PRODUCTS.filter((p) => (p.category || '') === cat).map((p) => `
+        <div class="p">
+          ${p.image ? `<img class="pimg" src="${p.image}" alt="${esc(p.name)}">` : `<div class="em">${p.emoji}</div>`}
+          <h3>${esc(p.name)}</h3><small>${esc(p.sub || '')}</small>
+          <div class="price">${aed(p.price)}</div>
+          <div class="step">${cart[p.id]
+            ? `<button data-dec="${p.id}">−</button><b>${cart[p.id]}</b><button data-inc="${p.id}">+</button>`
+            : `<button class="add" data-inc="${p.id}">Add</button>`}</div>
+        </div>`).join('')}
+    </div>`).join('');
+  const count = Object.values(cart).reduce((a, b) => a + b, 0);
+  const total = PRODUCTS.reduce((s, p) => s + (cart[p.id] || 0) * p.price, 0);
+  $('#bar').classList.toggle('hide', !count || $('#shop').classList.contains('hide'));
+  $('#barCount').textContent = `Checkout · ${count} pack${count > 1 ? 's' : ''}`;
+  $('#barTotal').textContent = aed(total);
+}
+$('#grid').addEventListener('click', (e) => {
+  const inc = e.target.dataset.inc, dec = e.target.dataset.dec;
+  if (inc) cart[inc] = (cart[inc] || 0) + 1;
+  if (dec) { cart[dec]--; if (!cart[dec]) delete cart[dec]; }
+  if (inc || dec) { haptic(); renderShop(); }
+});
+
+$('#checkoutBtn').onclick = () => {
+  const lines = PRODUCTS.filter((p) => cart[p.id]).map((p) => `<div class="row"><span>${esc(p.name)} × ${cart[p.id]}</span><span>${aed(cart[p.id] * p.price)}</span></div>`);
+  const total = PRODUCTS.reduce((s, p) => s + (cart[p.id] || 0) * p.price, 0);
+  $('#summary').innerHTML = lines.join('') + `<div class="row t"><span>Total (cash on delivery)</span><span>${aed(total)}</span></div>`;
+  const u = tg?.initDataUnsafe?.user;
+  if (u && !$('#f_name').value) $('#f_name').value = [u.first_name, u.last_name].filter(Boolean).join(' ');
+  $('#f_phone').value ||= store.get('mk_phone') || '';
+  $('#f_addr').value ||= store.get('mk_addr') || '';
+  $('#sheet').classList.remove('hide');
+};
+$('#closeSheet').onclick = () => $('#sheet').classList.add('hide');
+
+$('#placeBtn').onclick = async () => {
+  const btn = $('#placeBtn'); btn.disabled = true; btn.textContent = 'Sending…';
+  const body = {
+    items: Object.entries(cart).map(([id, qty]) => ({ id, qty })),
+    name: $('#f_name').value, phone: $('#f_phone').value, address: $('#f_addr').value, note: $('#f_note').value, ref: REF,
+  };
+  const r = await api('/api/order', body);
+  btn.disabled = false; btn.textContent = 'Place order';
+  if (!r.ok) return toast(r.error || 'Something went wrong');
+  store.set('mk_phone', body.phone); store.set('mk_addr', body.address);
+  for (const k in cart) delete cart[k];
+  $('#sheet').classList.add('hide');
+  tg?.HapticFeedback?.notificationOccurred?.('success');
+  toast(`Order #${r.id} placed! We'll call you to confirm.`);
+  renderShop();
+  if (inTG) loadMe();
+};
+
+// --- tabs ---
+document.querySelectorAll('.tabs button').forEach((b) => b.onclick = () => {
+  document.querySelectorAll('.tabs button').forEach((x) => x.classList.toggle('on', x === b));
+  ['shop', 'orders', 'earn'].forEach((t) => $('#' + t).classList.toggle('hide', t !== b.dataset.tab));
+  renderShop();
+});
+
+const openInTG = () => `<div class="card"><p class="muted">Open the shop inside Telegram to see your orders and agent earnings.</p>
+  <a class="btn" style="display:block;text-align:center;text-decoration:none" href="https://t.me/${BOT}${REF ? '?start=' + REF : ''}">Open in Telegram</a></div>`;
+
+function renderOrders(orders) {
+  if (!orders.length) return $('#orders').innerHTML = `<div class="card"><p class="muted">No orders yet.</p></div>`;
+  $('#orders').innerHTML = orders.map((o) => `<div class="card">
+    <div class="row"><b>Order #${o.id}</b><span class="pill ${o.status}">${o.status}</span></div>
+    ${JSON.parse(o.items).map((i) => `<div class="row muted"><span>${esc(i.name)} × ${i.qty}</span><span>${aed(i.qty * i.price)}</span></div>`).join('')}
+    <div class="row t"><span>${o.created_at.slice(0, 10)}</span><span>${aed(o.total)}</span></div></div>`).join('');
+}
+
+function renderEarn(agent) {
+  if (!agent) {
+    $('#earn').innerHTML = `<div class="card"><h2>Earn ${COMM}% on every sale</h2>
+      <p class="muted" style="margin-top:8px">Get your personal links. Every customer who orders through them is yours — you earn ${COMM}% of each delivered order, forever. ~${aed(Math.round(5999 * COMM / 100))} per pack.</p>
+      <button class="btn" id="joinBtn">Become an agent</button></div>`;
+    $('#joinBtn').onclick = async () => { const r = await api('/api/agent', {}); if (r.ok) loadMe(); else toast(r.error); };
+    return;
+  }
+  const s = agent.stats;
+  $('#earn').innerHTML = `<div class="card">
+    <div class="row"><h2>Your earnings</h2><span class="pill delivered">${agent.code}</span></div>
+    <div class="stats">
+      <div class="stat big"><small>Balance owed to you</small><div class="num">${aed(s.balance)}</div></div>
+      <div class="stat"><small>Total earned</small><div class="num">${aed(s.earned)}</div></div>
+      <div class="stat"><small>Pending delivery</small><div class="num">${aed(s.pending)}</div></div>
+      <div class="stat"><small>Paid out</small><div class="num">${aed(s.paid)}</div></div>
+      <div class="stat"><small>Delivered sales</small><div class="num">${s.sales}</div></div>
+      <div class="stat"><small>Customers</small><div class="num">${s.customers}</div></div>
+      <div class="stat"><small>Link clicks</small><div class="num">${s.clicks}</div></div>
+    </div></div>
+    <div class="card"><b>Your links</b>
+      <div class="link"><span style="flex:1">${agent.links.telegram}</span><button data-copy="${agent.links.telegram}">Copy</button></div>
+      <div class="link"><span style="flex:1">${agent.links.web}</span><button data-copy="${agent.links.web}">Copy</button></div>
+      <button class="btn" id="shareBtn">Share in Telegram</button></div>
+    <div class="card"><b>Your sales</b>
+      ${agent.sales.length ? agent.sales.map((o) => `<div class="row"><span>#${o.id} · ${o.created_at.slice(0, 10)}</span><span>+${aed(o.commission)} <span class="pill ${o.status}">${o.status}</span></span></div>`).join('') : '<p class="muted" style="margin-top:8px">No sales yet — share your link.</p>'}
+    </div>`;
+  $('#earn').querySelectorAll('[data-copy]').forEach((b) => b.onclick = () => { navigator.clipboard?.writeText(b.dataset.copy); toast('Copied'); });
+  $('#shareBtn').onclick = () => {
+    const text = 'Mommy Knows diapers, wet wipes & napkins — 59.99 AED per pack, cash on delivery 👶';
+    const u = `https://t.me/share/url?url=${encodeURIComponent(agent.links.telegram)}&text=${encodeURIComponent(text)}`;
+    tg?.openTelegramLink ? tg.openTelegramLink(u) : open(u);
+  };
+}
+
+async function loadMe() {
+  const r = await api('/api/me');
+  if (!r.ok) { $('#orders').innerHTML = $('#earn').innerHTML = `<div class="card"><p class="muted">${esc(r.error || 'Could not load')}</p></div>`; return; }
+  renderOrders(r.orders); renderEarn(r.agent);
+}
+
+(async () => {
+  const r = await api('/api/products');
+  PRODUCTS = r.products || []; BOT = r.bot; COMM = r.commission || 10;
+  renderShop();
+  if (inTG) loadMe(); else $('#orders').innerHTML = $('#earn').innerHTML = openInTG();
+})();
+</script>
+</body>
+</html>
