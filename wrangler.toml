@@ -21,8 +21,8 @@ PUBLIC_URL = "https://mommy-knows-shop.beckzodiy.workers.dev"
 COMMISSION_PERCENT = "10"
 
 # GRAM (TON) payments — start on testnet, see README for how to switch to mainnet.
-GRAM_MERCHANT_ADDRESS = "REPLACE_WITH_YOUR_TESTNET_WALLET_ADDRESS"
-TONCENTER_BASE_URL = "https://testnet.toncenter.com/api/v2"
+GRAM_MERCHANT_ADDRESS = "UQA8dXWKPfL2xemPiNEvpsDx5P_XZ0iuZSDwJJ7Ww2MDL3dH"
+TONCENTER_BASE_URL = "https://testnet.toncenter.com/api/v3"
 GRAM_QUOTE_MINUTES = "10"
 
 # Secrets (set with `npx wrangler secret put NAME`):

@@ -181,12 +181,12 @@ async function markOrder(env, id, paymentStatus, fields) {
 
 async function processIncomingTransaction(env, txn) {
   const msg = txn.in_msg;
-  const comment = (msg?.message || '').trim();
+  const comment = (msg?.message_content?.decoded?.comment || '').trim();
   if (!comment) return; // not a text-comment transfer — nothing to match on
 
   const order = await env.DB.prepare("SELECT * FROM orders WHERE gram_invoice_code = ? AND payment_method = 'gram'").bind(comment).first();
   const gotNanotons = BigInt(msg.value || '0');
-  const txHash = txn.transaction_id.hash;
+  const txHash = txn.hash;
   const sender = msg.source || 'unknown';
 
   if (!order) {
@@ -215,7 +215,7 @@ async function processIncomingTransaction(env, txn) {
 
   const expected = BigInt(order.gram_amount_nanotons);
   const expiresAtMs = new Date(order.quote_expires_at).getTime();
-  const late = txn.utime * 1000 > expiresAtMs;
+  const late = txn.now * 1000 > expiresAtMs;
 
   if (late) {
     await markOrder(env, order.id, 'late', { paid_amount_nanotons: gotNanotons.toString(), tx_hash: txHash });
@@ -266,37 +266,55 @@ async function processIncomingTransaction(env, txn) {
 // merchant wallet for new incoming transactions since the last check and
 // matches them to orders by on-chain comment + amount — the only thing that
 // actually marks a GRAM order paid.
+//
+// Uses TON Center's v3 (indexed) API, not v2: v2 is a direct liteserver and
+// routinely fails with "lt not in db" once a transaction ages out of a
+// non-archival node's retention window, and the public `archival=true`
+// routing isn't reliably available either. v3 is backed by a persistent
+// indexer, so it doesn't have that problem (confirmed against this wallet's
+// actual history before switching).
 export async function pollGramPayments(env) {
   const headers = env.TONCENTER_API_KEY ? { 'X-API-Key': env.TONCENTER_API_KEY } : {};
   const state = await env.DB.prepare('SELECT * FROM gram_poll_state WHERE id = 1').first();
 
-  const url = new URL(env.TONCENTER_BASE_URL + '/getTransactions');
-  url.searchParams.set('address', env.GRAM_MERCHANT_ADDRESS);
-  url.searchParams.set('limit', '50');
-  if (state?.last_lt) url.searchParams.set('to_lt', state.last_lt);
-
-  const r = await fetch(url, { headers });
-  if (!r.ok) { console.error('gram poll: toncenter http', r.status); return; }
-  const j = await r.json();
-  if (!j.ok) { console.error('gram poll: toncenter error', j.error); return; }
-  const txs = j.result || []; // newest first
-  if (!txs.length) return;
-
   if (!state?.last_lt) {
     // First run ever — remember the current tip, don't process pre-existing history.
-    await env.DB.prepare('UPDATE gram_poll_state SET last_lt = ?, last_hash = ? WHERE id = 1')
-      .bind(txs[0].transaction_id.lt, txs[0].transaction_id.hash).run();
+    const bootUrl = new URL(env.TONCENTER_BASE_URL + '/transactions');
+    bootUrl.searchParams.set('account', env.GRAM_MERCHANT_ADDRESS);
+    bootUrl.searchParams.set('sort', 'desc');
+    bootUrl.searchParams.set('limit', '1');
+    const r = await fetch(bootUrl, { headers });
+    if (!r.ok) { console.error('gram poll: toncenter http', r.status, await r.text()); return; }
+    const j = await r.json();
+    const [newest] = j.transactions || [];
+    if (newest) {
+      await env.DB.prepare('UPDATE gram_poll_state SET last_lt = ?, last_hash = ? WHERE id = 1')
+        .bind(newest.lt, newest.hash).run();
+    } else {
+      // No history at all yet — start from lt 0 so the next run picks up the wallet's very first transaction.
+      await env.DB.prepare('UPDATE gram_poll_state SET last_lt = ?, last_hash = ? WHERE id = 1').bind('0', '').run();
+    }
     return;
   }
 
-  if (txs.length === 50 && BigInt(txs[txs.length - 1].transaction_id.lt) > BigInt(state.last_lt)) {
-    console.error('gram poll: more than 50 new transactions since last check — catching up over the next few runs');
+  const url = new URL(env.TONCENTER_BASE_URL + '/transactions');
+  url.searchParams.set('account', env.GRAM_MERCHANT_ADDRESS);
+  url.searchParams.set('sort', 'asc');
+  url.searchParams.set('limit', '50');
+  url.searchParams.set('start_lt', (BigInt(state.last_lt) + 1n).toString());
+
+  const r = await fetch(url, { headers });
+  if (!r.ok) { console.error('gram poll: toncenter http', r.status, await r.text()); return; }
+  const j = await r.json();
+  const txs = j.transactions || []; // ascending lt, already filtered to > last_lt by start_lt
+  if (!txs.length) return;
+
+  if (txs.length === 50) {
+    console.error('gram poll: got a full page of 50 — there may be more pending, catching up over the next few runs');
   }
 
-  for (const txn of [...txs].reverse()) { // oldest first, so the cursor advances in order
-    if (BigInt(txn.transaction_id.lt) <= BigInt(state.last_lt)) continue;
+  for (const txn of txs) {
     await processIncomingTransaction(env, txn);
-    await env.DB.prepare('UPDATE gram_poll_state SET last_lt = ?, last_hash = ? WHERE id = 1')
-      .bind(txn.transaction_id.lt, txn.transaction_id.hash).run();
+    await env.DB.prepare('UPDATE gram_poll_state SET last_lt = ?, last_hash = ? WHERE id = 1').bind(txn.lt, txn.hash).run();
   }
 }
