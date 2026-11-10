@@ -2,6 +2,9 @@
 // Money is handled in fils (integers). 5999 = 59.99 AED.
 import indexHtml from '../public/index.html';
 import { PANTS_L_IMG, PANTS_M_IMG, PANTS_XL_IMG, PANTS_XXL_IMG, PANTS_XXXL_IMG, TAPE_NB_IMG, TAPE_S_IMG, TAPE_M_IMG, TAPE_L_IMG, TAPE_XL_IMG, TAPE_XXL_IMG } from './product-images.js';
+import { tg } from './telegram.js';
+import { aed, esc, getAgent, getAgentByUser, orderText, adminButtons, notifyAdmin } from './common.js';
+import { createGramQuote, buildPayWidgetMessage, handleWidgetQuery, pollGramPayments } from './gram.js';
 
 // ---- Catalog: edit names / prices here (server-side prices are the only ones trusted) ----
 const PRODUCTS = [
@@ -19,26 +22,8 @@ const PRODUCTS = [
 ];
 const STATUSES = ['pending', 'confirmed', 'delivered', 'cancelled'];
 
-const aed = (f) => (f / 100).toFixed(2) + ' AED';
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
-const esc = (s) => String(s ?? '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-
-async function tg(env, method, body) {
-  try {
-    const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const j = await r.json();
-    if (!j.ok) console.error('tg', method, j.description);
-    return j;
-  } catch (e) {
-    console.error('tg', method, e.message); // a failed notification must never break an order
-    return { ok: false };
-  }
-}
 
 // ---------- Telegram Mini App initData validation ----------
 async function hmac(key, data) {
@@ -74,8 +59,6 @@ async function upsertUser(env, u) {
   ).bind(u.id, u.username || null, u.first_name || null).run();
   return env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(u.id).first();
 }
-const getAgent = (env, code) => env.DB.prepare('SELECT * FROM agents WHERE code = ?').bind(code).first();
-const getAgentByUser = (env, uid) => env.DB.prepare('SELECT * FROM agents WHERE user_id = ?').bind(uid).first();
 
 // First-touch attribution: once a customer is linked to an agent, it stays.
 async function attachReferral(env, user, code) {
@@ -136,6 +119,10 @@ async function createOrder(env, body, tgUser) {
   if (!items.length) return { error: 'Cart is empty' };
   if (!name || !address || !/^\+?[0-9 ()-]{7,20}$/.test(phone)) return { error: 'Please fill name, valid phone and address' };
 
+  const paymentMethod = body.payment_method === 'gram' ? 'gram' : 'cod';
+  // The pay widget is delivered as a Telegram message, so GRAM only works for orders placed inside Telegram.
+  if (paymentMethod === 'gram' && !tgUser) return { error: 'Pay with GRAM only works inside the Telegram app — open the bot, or choose cash on delivery' };
+
   let agentCode = null;
   if (tgUser) {
     const user = await upsertUser(env, tgUser);
@@ -147,50 +134,43 @@ async function createOrder(env, body, tgUser) {
 
   const total = items.reduce((s, i) => s + i.qty * i.price, 0);
   const commission = agentCode ? Math.round((total * Number(env.COMMISSION_PERCENT || 10)) / 100) : 0;
+
+  let quote = null;
+  if (paymentMethod === 'gram') {
+    try {
+      quote = await createGramQuote(env, total);
+    } catch (e) {
+      console.error('gram quote failed', e.message);
+      return { error: 'Could not get a live GRAM rate right now — please try again shortly, or choose cash on delivery' };
+    }
+  }
+
   const r = await env.DB.prepare(
-    `INSERT INTO orders (user_id, customer_name, phone, address, note, items, total, agent_code, commission)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(tgUser?.id ?? null, name, phone, address, note, JSON.stringify(items), total, agentCode, commission).run();
+    `INSERT INTO orders (user_id, customer_name, phone, address, note, items, total, agent_code, commission,
+       payment_method, payment_status, gram_invoice_code, gram_amount_nanotons, gram_rate_aed, quote_expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    tgUser?.id ?? null, name, phone, address, note, JSON.stringify(items), total, agentCode, commission,
+    paymentMethod, quote ? 'awaiting' : null,
+    quote?.invoiceCode ?? null, quote?.nanotons ?? null, quote?.rateAedPerGram ?? null, quote?.expiresAt ?? null,
+  ).run();
   const order = await env.DB.prepare('SELECT * FROM orders WHERE id = ?').bind(r.meta.last_row_id).first();
 
-  await notifyAdmin(env, order, tgUser);
-  if (agentCode) {
-    const agent = await getAgent(env, agentCode);
-    await tg(env, 'sendMessage', {
-      chat_id: agent.user_id,
-      text: `🛒 New order #${order.id} from your customer — ${aed(total)}.\nYour commission ${aed(commission)} will be credited after delivery.`,
-    });
+  if (paymentMethod === 'gram') {
+    // Admin/agent are only told once the payment actually clears on-chain (see gram.js) — an
+    // unpaid, possibly-abandoned quote shouldn't trigger the same alert a real order does.
+    await tg(env, 'sendWidget', buildPayWidgetMessage(order));
+  } else {
+    await notifyAdmin(env, order, tgUser);
+    if (agentCode) {
+      const agent = await getAgent(env, agentCode);
+      await tg(env, 'sendMessage', {
+        chat_id: agent.user_id,
+        text: `🛒 New order #${order.id} from your customer — ${aed(total)}.\nYour commission ${aed(commission)} will be credited after delivery.`,
+      });
+    }
   }
   return { order };
-}
-
-function orderText(o, tgUser, agent) {
-  const items = JSON.parse(o.items).map((i) => `• ${esc(i.name)} × ${i.qty} = ${aed(i.qty * i.price)}`).join('\n');
-  return [
-    `🧾 <b>Order #${o.id}</b> — <b>${o.status.toUpperCase()}</b>`,
-    items,
-    `<b>Total: ${aed(o.total)}</b> (cash on delivery)`,
-    '',
-    `👤 ${esc(o.customer_name)}${tgUser?.username ? ' (@' + esc(tgUser.username) + ')' : ''}`,
-    `📞 ${esc(o.phone)}`,
-    `📍 ${esc(o.address)}`,
-    o.note ? `📝 ${esc(o.note)}` : '',
-    agent ? `🤝 Agent: ${esc(agent.name)} [${agent.code}] — commission ${aed(o.commission)}` : '🤝 No agent',
-    o.user_id ? '' : '🌐 Ordered from website (not Telegram)',
-  ].filter((l) => l !== '').join('\n');
-}
-const adminButtons = (id) => ({
-  inline_keyboard: [[
-    { text: '✅ Confirm', callback_data: `st:${id}:confirmed` },
-    { text: '📦 Delivered', callback_data: `st:${id}:delivered` },
-    { text: '❌ Cancel', callback_data: `st:${id}:cancelled` },
-  ]],
-});
-async function notifyAdmin(env, o, tgUser) {
-  const agent = o.agent_code ? await getAgent(env, o.agent_code) : null;
-  await tg(env, 'sendMessage', {
-    chat_id: env.ADMIN_ID, parse_mode: 'HTML', text: orderText(o, tgUser, agent), reply_markup: adminButtons(o.id),
-  });
 }
 
 async function setStatus(env, id, status, cq) {
@@ -225,6 +205,8 @@ const shopButton = (env) => ({
 });
 
 async function handleUpdate(env, update) {
+  if (update.widget_query) return handleWidgetQuery(env, update.widget_query);
+
   if (update.callback_query) {
     const cq = update.callback_query;
     if (String(cq.from.id) !== String(env.ADMIN_ID)) return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Admins only' });
@@ -328,7 +310,7 @@ export default {
         const res = {
           webhook: await tg(env, 'setWebhook', {
             url: `${env.PUBLIC_URL}/webhook`, secret_token: env.WEBHOOK_SECRET,
-            allowed_updates: ['message', 'callback_query'], drop_pending_updates: true,
+            allowed_updates: ['message', 'callback_query', 'widget_query'], drop_pending_updates: true,
           }),
           menu: await tg(env, 'setChatMenuButton', { menu_button: { type: 'web_app', text: 'Shop', web_app: { url: env.PUBLIC_URL } } }),
           commands: await tg(env, 'setMyCommands', { commands: [
@@ -359,7 +341,13 @@ export default {
           if (initData && !auth) return json({ error: 'Invalid session, reopen the app' }, 401);
           const ref = body.ref || auth?.start_param;
           const r = await createOrder(env, { ...body, ref }, auth?.user);
-          return r.error ? json(r, 400) : json({ ok: true, id: r.order.id, total: r.order.total });
+          if (r.error) return json(r, 400);
+          const gram = r.order.payment_method === 'gram' ? {
+            invoice_code: r.order.gram_invoice_code,
+            gram_amount: Number(r.order.gram_amount_nanotons) / 1e9,
+            expires_at: r.order.quote_expires_at,
+          } : undefined;
+          return json({ ok: true, id: r.order.id, total: r.order.total, payment_method: r.order.payment_method, gram });
         }
 
         if (!auth?.user) return json({ error: 'Open this inside Telegram' }, 401);
@@ -389,5 +377,9 @@ export default {
     }
     if (req.method === 'GET') return new Response(indexHtml, { headers: { 'content-type': 'text/html; charset=utf-8' } });
     return new Response('Not found', { status: 404 });
+  },
+
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(pollGramPayments(env).catch((e) => console.error('gram poll failed', e)));
   },
 };

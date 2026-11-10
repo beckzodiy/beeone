@@ -6,5 +6,10 @@
     "deploy": "wrangler deploy",
     "db:init": "wrangler d1 execute mommy-knows-db --remote --file=schema.sql"
   },
-  "devDependencies": { "wrangler": "^4" }
+  "devDependencies": {
+    "wrangler": "^4"
+  },
+  "dependencies": {
+    "@ton/core": "^0.63.1"
+  }
 }

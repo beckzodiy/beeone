@@ -1,8 +1,13 @@
 name = "mommy-knows-shop"
 main = "src/index.js"
 compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"] # needed for @ton/core (uses Buffer) to build the on-chain payment comment
 
 # Mini app HTML is inlined into the Worker (see src/index.js); /api/* and /webhook go to the Worker too.
+
+# Polls TON for incoming GRAM payments once a minute; see scheduled() in src/index.js.
+[triggers]
+crons = ["* * * * *"]
 
 [[d1_databases]]
 binding = "DB"
@@ -15,6 +20,12 @@ BOT_USERNAME = "beeone_orderbot"
 PUBLIC_URL = "https://mommy-knows-shop.beckzodiy.workers.dev"
 COMMISSION_PERCENT = "10"
 
+# GRAM (TON) payments — start on testnet, see README for how to switch to mainnet.
+GRAM_MERCHANT_ADDRESS = "REPLACE_WITH_YOUR_TESTNET_WALLET_ADDRESS"
+TONCENTER_BASE_URL = "https://testnet.toncenter.com/api/v2"
+GRAM_QUOTE_MINUTES = "10"
+
 # Secrets (set with `npx wrangler secret put NAME`):
-#   BOT_TOKEN       - from @BotFather
-#   WEBHOOK_SECRET  - any random string (A-Z a-z 0-9 _ -), protects /webhook and /setup
+#   BOT_TOKEN           - from @BotFather
+#   WEBHOOK_SECRET      - any random string (A-Z a-z 0-9 _ -), protects /webhook and /setup
+#   TONCENTER_API_KEY   - optional, free via https://t.me/toncenter ("Manage API Keys"); raises the 10 req/sec default limit

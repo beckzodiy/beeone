@@ -26,10 +26,23 @@ CREATE TABLE IF NOT EXISTS orders (
   agent_code     TEXT,
   commission     INTEGER NOT NULL DEFAULT 0, -- fils, counted only when status = 'delivered'
   status         TEXT NOT NULL DEFAULT 'pending', -- pending | confirmed | delivered | cancelled
-  created_at     TEXT DEFAULT (datetime('now'))
+  created_at     TEXT DEFAULT (datetime('now')),
+
+  -- GRAM (TON) payment. NULL/'cod' fields mean a normal cash-on-delivery order.
+  payment_method        TEXT NOT NULL DEFAULT 'cod', -- cod | gram
+  payment_status        TEXT,                        -- NULL for cod; else awaiting|paid|expired|underpaid|overpaid|duplicate|late|unmatched
+  gram_invoice_code     TEXT,                         -- unique on-chain comment identifying this order
+  gram_amount_nanotons  TEXT,                         -- locked quote, nanotons as decimal string
+  gram_rate_aed         REAL,                         -- AED per 1 GRAM at quote time, for audit
+  quote_expires_at      TEXT,                         -- ISO datetime, quote valid until
+  gram_claimed_msg_hash TEXT,                         -- msg_hash Telegram reported (untrusted, cross-check only)
+  paid_amount_nanotons  TEXT,                         -- actual amount matched on-chain
+  tx_hash               TEXT,                         -- matched transaction hash (verified via TON API)
+  paid_at               TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_orders_agent ON orders(agent_code);
 CREATE INDEX IF NOT EXISTS idx_orders_user  ON orders(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_gram_code ON orders(gram_invoice_code) WHERE gram_invoice_code IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS payouts (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,3 +57,11 @@ CREATE TABLE IF NOT EXISTS clicks (
   count       INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (agent_code, day)
 );
+
+-- Single-row cursor for incremental GRAM payment polling (see migrations/0001_gram_payments.sql).
+CREATE TABLE IF NOT EXISTS gram_poll_state (
+  id        INTEGER PRIMARY KEY CHECK (id = 1),
+  last_lt   TEXT,
+  last_hash TEXT
+);
+INSERT OR IGNORE INTO gram_poll_state (id, last_lt, last_hash) VALUES (1, NULL, NULL);
