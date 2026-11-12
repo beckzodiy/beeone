@@ -209,7 +209,11 @@ $('#placeBtn').onclick = async () => {
   $('#sheet').classList.add('hide');
   tg?.HapticFeedback?.notificationOccurred?.('success');
   if (r.payment_method === 'gram' && r.gram) {
-    toast(`Order #${r.id} created — check this chat to pay ${r.gram.gram_amount.toFixed(4)} GRAM.`);
+    // Checkout continues in the chat, in the widget the bot just sent.
+    toast(`Order #${r.id} created. Finish payment in the chat.`);
+    renderShop();
+    setTimeout(() => tg.close(), 900);
+    return;
   } else {
     toast(`Order #${r.id} placed! We'll call you to confirm.`);
   }

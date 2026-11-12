@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS orders (
   gram_rate_aed         REAL,                         -- AED per 1 GRAM at quote time, for audit
   quote_expires_at      TEXT,                         -- ISO datetime, quote valid until
   gram_claimed_msg_hash TEXT,                         -- msg_hash Telegram reported (untrusted, cross-check only)
+  gram_widget_message_id INTEGER,                     -- the checkout widget message in the customer's chat
   paid_amount_nanotons  TEXT,                         -- actual amount matched on-chain
   tx_hash               TEXT,                         -- matched transaction hash (verified via TON API)
   paid_at               TEXT

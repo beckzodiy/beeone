@@ -157,9 +157,15 @@ async function createOrder(env, body, tgUser) {
   const order = await env.DB.prepare('SELECT * FROM orders WHERE id = ?').bind(r.meta.last_row_id).first();
 
   if (paymentMethod === 'gram') {
-    // Admin/agent are only told once the payment actually clears on-chain (see gram.js) — an
-    // unpaid, possibly-abandoned quote shouldn't trigger the same alert a real order does.
-    await tg(env, 'sendWidget', buildPayWidgetMessage(order));
+    // Checkout continues in the chat: the widget shows the order and takes the payment.
+    // Admin/agent are only told once the payment clears on-chain (see gram.js).
+    const sent = await tg(env, 'sendWidget', buildPayWidgetMessage(order));
+    if (!sent.ok) {
+      await env.DB.prepare('DELETE FROM orders WHERE id = ?').bind(order.id).run();
+      return { error: 'Could not open the GRAM checkout in this chat. Update Telegram, or choose cash on delivery.' };
+    }
+    await env.DB.prepare('UPDATE orders SET gram_widget_message_id = ? WHERE id = ?').bind(sent.result.message_id, order.id).run();
+    order.gram_widget_message_id = sent.result.message_id;
   } else {
     await notifyAdmin(env, order, tgUser);
     if (agentCode) {
