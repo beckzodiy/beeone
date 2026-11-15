@@ -14,6 +14,7 @@
 import { beginCell, Address } from '@ton/core';
 import { tg } from './telegram.js';
 import { aed, esc, getAgent, notifyAdmin } from './common.js';
+import { pushCard, handleCardQuery } from './card.js';
 
 const FINAL_PAID = ['paid', 'overpaid'];
 
@@ -96,7 +97,7 @@ function formatNanotons(n) {
 }
 
 // ---------- The widget's state (written only by the bot, as chat_data) ----------
-function widgetState(o) {
+export function widgetState(o) {
   if (o.payment_method !== 'gram') return { s: 'cod' };
   const g = gramText(o.gram_amount_nanotons);
   if (o.payment_status === 'paid' || o.payment_status === 'overpaid') return { s: 'paid', g: gramText(o.paid_amount_nanotons || o.gram_amount_nanotons) };
@@ -107,8 +108,9 @@ function widgetState(o) {
 }
 
 // Push the order's payment state to whichever checkout the customer has in the chat.
-async function pushCheckoutState(env, o) {
+export async function pushCheckoutState(env, o) {
   if (!o.user_id) return;
+  await pushCard(env, o);
   if (o.gram_widget_message_id) {
     await tg(env, 'editMessageWidgetData', {
       chat_id: o.user_id, message_id: o.gram_widget_message_id, chat_data: JSON.stringify(widgetState(o)),
@@ -163,23 +165,36 @@ function payMessage(env, o) {
   };
 }
 
-// Opens the GRAM checkout in the customer's chat as a Telegram widget. No other checkout:
-// if Telegram refuses the widget, the order is not placed.
-export async function sendGramCheckout(env, order) {
-  const w = await tg(env, 'sendWidget', buildPayWidgetMessage(order));
-  if (!w.ok) return false;
-  await env.DB.prepare('UPDATE orders SET gram_widget_message_id = ? WHERE id = ?').bind(w.result.message_id, order.id).run();
-  return true;
+// A GRAM order the customer can still pay (or re-price, or switch to cash).
+export const isPayable = (o) => o.payment_method === 'gram' && (o.payment_status === 'awaiting' || o.payment_status === 'expired')
+  && o.status !== 'cancelled' && o.status !== 'delivered';
+
+// The TON Connect transaction the widget hands to Telegram's wallet, or { error }.
+export async function buildPayTransaction(env, o) {
+  const expiresAtMs = new Date(o.quote_expires_at).getTime();
+  if (expiresAtMs <= Date.now()) {
+    await env.DB.prepare("UPDATE orders SET payment_status = 'expired' WHERE id = ?").bind(o.id).run();
+    return { error: 'This price has expired. Get a new price.' };
+  }
+  if (o.gram_claimed_msg_hash) return { error: 'Payment already sent. Tap Check status.' };
+  return {
+    valid_until: Math.floor(expiresAtMs / 1000),
+    messages: [{ address: env.GRAM_MERCHANT_ADDRESS, amount: o.gram_amount_nanotons, payload: commentPayloadBase64(o.gram_invoice_code) }],
+  };
 }
 
-async function requote(env, o) {
+// Telegram's "the user sent it" notice: shown as "confirming…", never treated as payment.
+export const claimSentTransaction = (env, o, hash) =>
+  env.DB.prepare('UPDATE orders SET gram_claimed_msg_hash = ? WHERE id = ?').bind(hash || '?', o.id).run();
+
+export async function requote(env, o) {
   const q = await quoteAmount(env, o.total);
   await env.DB.prepare(
     "UPDATE orders SET payment_status = 'awaiting', gram_amount_nanotons = ?, gram_rate_aed = ?, quote_expires_at = ?, gram_claimed_msg_hash = NULL WHERE id = ?"
   ).bind(q.nanotons, q.rateAedPerGram, q.expiresAt, o.id).run();
 }
 
-async function switchToCod(env, o, from) {
+export async function switchToCod(env, o, from) {
   await env.DB.prepare("UPDATE orders SET payment_method = 'cod', payment_status = NULL WHERE id = ?").bind(o.id).run();
   const fresh = await getOrder(env, o.id);
   await notifyAdmin(env, fresh, from);
@@ -271,7 +286,7 @@ async function processOutgoingTransaction(env, txn) {
   }
 }
 
-const getOrder = (env, id) => env.DB.prepare('SELECT * FROM orders WHERE id = ?').bind(id).first();
+export const getOrder = (env, id) => env.DB.prepare('SELECT * FROM orders WHERE id = ?').bind(id).first();
 
 // ---------- The widget itself ----------
 // The HTML is fixed once sent; everything that changes comes from chat_data.
@@ -361,14 +376,16 @@ export function buildPayWidgetMessage(order) {
 
 // ---------- Requests from the widget ----------
 // Never marks an order paid: only pollGramPayments() does, against the chain.
+// Order cards (card.js) send "<action>:<order id>"; the first checkout widgets,
+// sent before cards existed, send "<action>:<invoice code>" and are still served here.
 export async function handleWidgetQuery(env, wq) {
-  const answer = (data) => tg(env, 'answerWidgetQuery', { widget_query_id: wq.id, data: JSON.stringify(data) });
-  const [action, code] = String(wq.data || '').split(':');
-  let o = code && (await env.DB.prepare('SELECT * FROM orders WHERE gram_invoice_code = ?').bind(code).first());
-  // `from` is authenticated by Telegram; only the customer who placed the order may act on it.
-  if (!o || o.user_id !== wq.from?.id) return answer({ err: 'Order not found.' });
+  const [action, key, arg] = String(wq.data || '').split(':');
+  if (/^\d+$/.test(key || '')) return handleCardQuery(env, wq, action, Number(key), arg);
 
-  const open = o.payment_method === 'gram' && (o.payment_status === 'awaiting' || o.payment_status === 'expired');
+  const answer = (data) => tg(env, 'answerWidgetQuery', { widget_query_id: wq.id, data: JSON.stringify(data) });
+  let o = key && (await env.DB.prepare('SELECT * FROM orders WHERE gram_invoice_code = ?').bind(key).first());
+  if (!o || o.user_id !== wq.from?.id) return answer({ err: 'Order not found.' });
+  const open = isPayable(o);
   const reply = async (err) => {
     o = await getOrder(env, o.id);
     await pushCheckoutState(env, o);
@@ -376,39 +393,22 @@ export async function handleWidgetQuery(env, wq) {
   };
 
   if (wq.type?.type === 'sent_transaction') {
-    if (open) await env.DB.prepare('UPDATE orders SET gram_claimed_msg_hash = ? WHERE id = ?').bind(wq.type.msg_hash || '?', o.id).run();
+    if (open) await claimSentTransaction(env, o, wq.type.msg_hash);
     return reply();
   }
-
   if (action === 'pay') {
-    const expiresAtMs = new Date(o.quote_expires_at).getTime();
-    if (open && expiresAtMs <= Date.now()) {
-      await env.DB.prepare("UPDATE orders SET payment_status = 'expired' WHERE id = ?").bind(o.id).run();
-      return reply('This price has expired. Get a new price.');
-    }
-    if (!open || o.gram_claimed_msg_hash) return reply();
-    return answer({
-      valid_until: Math.floor(expiresAtMs / 1000),
-      messages: [{ address: env.GRAM_MERCHANT_ADDRESS, amount: o.gram_amount_nanotons, payload: commentPayloadBase64(o.gram_invoice_code) }],
-    });
+    if (!open) return reply();
+    const tx = await buildPayTransaction(env, o);
+    return tx.error ? reply(tx.error) : answer(tx);
   }
-
   if (action === 'new' && open) {
-    try {
-      await requote(env, o);
-    } catch (e) {
+    try { await requote(env, o); } catch (e) {
       console.error('gram requote failed', e.message);
       return reply('Could not get a live price right now. Try again in a moment.');
     }
-    return reply();
   }
-
-  if (action === 'cod' && open) {
-    await switchToCod(env, o, wq.from);
-    return reply();
-  }
-
-  return reply(); // 'st' and anything that no longer applies: just report the current state
+  if (action === 'cod' && open) await switchToCod(env, o, wq.from);
+  return reply();
 }
 
 async function notifyAgentOfOrder(env, o, how) {

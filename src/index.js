@@ -4,7 +4,8 @@ import indexHtml from '../public/index.html';
 import { PANTS_L_IMG, PANTS_M_IMG, PANTS_XL_IMG, PANTS_XXL_IMG, PANTS_XXXL_IMG, TAPE_NB_IMG, TAPE_S_IMG, TAPE_M_IMG, TAPE_L_IMG, TAPE_XL_IMG, TAPE_XXL_IMG } from './product-images.js';
 import { tg } from './telegram.js';
 import { aed, esc, getAgent, getAgentByUser, orderText, adminButtons, notifyAdmin } from './common.js';
-import { createGramQuote, sendGramCheckout, handleWidgetQuery, handleGramCallback, pollGramPayments } from './gram.js';
+import { createGramQuote, handleWidgetQuery, handleGramCallback, pollGramPayments, pushCheckoutState } from './gram.js';
+import { sendCard, moveCard } from './card.js';
 
 // ---- Catalog: edit names / prices here (server-side prices are the only ones trusted) ----
 const PRODUCTS = [
@@ -105,13 +106,19 @@ function agentLinks(env, code) {
 }
 
 // ---------- Orders ----------
-async function createOrder(env, body, tgUser) {
+// [{ id, qty }] -> [{ id, name, qty, price }] at today's catalogue; unknown products are dropped.
+function resolveItems(raw) {
   const items = [];
-  for (const it of Array.isArray(body.items) ? body.items : []) {
+  for (const it of Array.isArray(raw) ? raw : []) {
     const p = PRODUCTS.find((x) => x.id === it.id);
     const qty = Math.floor(Number(it.qty));
     if (p && qty > 0 && qty <= 100) items.push({ id: p.id, name: p.name, qty, price: p.price });
   }
+  return items;
+}
+
+async function createOrder(env, body, tgUser) {
+  const items = resolveItems(body.items);
   const name = String(body.name || '').trim().slice(0, 80);
   const phone = String(body.phone || '').trim().slice(0, 30);
   const address = String(body.address || '').trim().slice(0, 300);
@@ -131,7 +138,21 @@ async function createOrder(env, body, tgUser) {
     const c = cleanCode(body.ref);
     if (c && (await getAgent(env, c))) agentCode = c; // website order: ref from link only
   }
+  return placeOrder(env, { tgUser, items, name, phone, address, note, agentCode, paymentMethod });
+}
 
+// "Order again" from an order card: same items (today's prices), same contact
+// details, shown on the same card (cardMessageId) instead of a new widget.
+export async function reorderFrom(env, old, paymentMethod, cardMessageId, tgUser) {
+  const items = resolveItems(JSON.parse(old.items));
+  if (!items.length) return { error: 'These products are no longer available. Open the shop to order.' };
+  return placeOrder(env, {
+    tgUser, items, name: old.customer_name, phone: old.phone, address: old.address, note: '',
+    agentCode: old.agent_code, paymentMethod, cardMessageId,
+  });
+}
+
+async function placeOrder(env, { tgUser, items, name, phone, address, note, agentCode, paymentMethod, cardMessageId }) {
   const total = items.reduce((s, i) => s + i.qty * i.price, 0);
   const commission = agentCode ? Math.round((total * Number(env.COMMISSION_PERCENT || 10)) / 100) : 0;
 
@@ -156,13 +177,15 @@ async function createOrder(env, body, tgUser) {
   ).run();
   const order = await env.DB.prepare('SELECT * FROM orders WHERE id = ?').bind(r.meta.last_row_id).first();
 
+  // The order card in the customer's chat: the tracker for every order, and the checkout for GRAM.
+  const carded = tgUser && (cardMessageId ? await moveCard(env, order, cardMessageId) : await sendCard(env, order));
   if (paymentMethod === 'gram') {
-    // Checkout continues in the chat: the widget shows the order and takes the payment.
-    // Admin/agent are only told once the payment clears on-chain (see gram.js).
-    if (!(await sendGramCheckout(env, order))) {
+    // GRAM is paid only inside the card, so without one there is no order.
+    if (!carded) {
       await env.DB.prepare('DELETE FROM orders WHERE id = ?').bind(order.id).run();
       return { error: 'Telegram did not open the GRAM payment widget right now. Please choose cash on delivery, or try again later.' };
     }
+    // Admin and agent hear about it once the payment clears on-chain (see gram.js).
   } else {
     await notifyAdmin(env, order, tgUser);
     if (agentCode) {
@@ -182,6 +205,7 @@ async function setStatus(env, id, status, cq) {
   if (o.status === 'delivered' || o.status === 'cancelled') return `Already ${o.status}`;
   await env.DB.prepare('UPDATE orders SET status = ? WHERE id = ?').bind(status, id).run();
   const updated = { ...o, status };
+  await pushCheckoutState(env, updated); // the tracker on the customer's order card
   const agent = o.agent_code ? await getAgent(env, o.agent_code) : null;
 
   if (cq) {

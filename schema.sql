@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS orders (
   gram_claimed_msg_hash TEXT,                         -- msg_hash Telegram reported (untrusted, cross-check only)
   gram_widget_message_id INTEGER,                     -- the checkout widget message in the customer's chat
   gram_pay_message_id   INTEGER,                      -- fallback checkout message, when Telegram refuses the widget
+  card_message_id       INTEGER,                      -- the order card widget (tracker + checkout) in the customer's chat
   gram_payer_address    TEXT,                         -- wallet the payment came from (refunds go back here)
   paid_amount_nanotons  TEXT,                         -- actual amount matched on-chain
   tx_hash               TEXT,                         -- matched transaction hash (verified via TON API)

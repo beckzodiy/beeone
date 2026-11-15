@@ -1,0 +1,89 @@
+<style>
+.r{display:flex;justify-content:space-between;gap:12px}
+.m{color:var(--tg-theme-hint-color);font-size:.85em}
+.g{font-size:1.5em;font-weight:700;margin-top:6px}
+button{width:100%;margin-top:8px}
+.l{background:none;color:var(--tg-theme-link-color)}
+.tr{display:flex;gap:4px;margin:10px 0 6px}
+.tr div{flex:1;text-align:center;font-size:.75em;color:var(--tg-theme-hint-color);border-top:3px solid var(--tg-theme-hint-color);padding-top:4px}
+.tr .on{color:var(--tg-theme-text-color);border-color:var(--tg-theme-button-color)}
+hr{border:0;border-top:1px solid var(--tg-theme-hint-color);margin:8px 0}
+</style>
+<div id=v></div>
+<script>
+var W=TelegramWidget,v=document.getElementById('v'),S={},busy=0,note='',ask='';
+var STEPS=[['pending','Placed'],['confirmed','Confirmed'],['delivered','Delivered']];
+function e(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function aed(f){return (f/100).toFixed(2)+' AED'}
+function read(){try{S=JSON.parse(W.chatData)||{}}catch(x){S={}}}
+function P(){return S.p||{}}
+function left(){return (P().exp||0)-Date.now()}
+function clock(){var l=Math.max(0,left()),s=Math.floor(l%60000/1000);return Math.floor(l/60000)+':'+(s<10?'0':'')+s}
+function btn(id,t,c){return '<button id='+id+(c?' class='+c:'')+(busy?' disabled':'')+'>'+t+'</button>'}
+function render(){
+  if(!S.o){v.innerHTML='<p class=m>Loading…</p>';return}
+  var p=P(),done=S.st==='delivered'||S.st==='cancelled',h='<b>Order #'+S.o+'</b>',i,k=0;
+  (S.it||[]).forEach(function(x){h+='<div class=r><span>'+e(x[0])+' × '+x[1]+'</span><span>'+aed(x[1]*x[2])+'</span></div>'});
+  h+='<hr><div class=r><b>Total</b><b>'+aed(S.t)+'</b></div><div class=m>📍 '+e(S.a)+'</div>';
+  if(S.st==='cancelled')h+='<p><b>❌ Cancelled</b></p>';
+  else{
+    for(i=0;i<STEPS.length;i++)if(STEPS[i][0]===S.st)k=i;
+    h+='<div class=tr>';
+    for(i=0;i<STEPS.length;i++)h+='<div'+(i<=k?' class=on':'')+'>'+STEPS[i][1]+'</div>';
+    h+='</div>';
+  }
+  if(p.s==='paid')h+='<div class=m>✅ Paid '+p.g+' GRAM</div>';
+  else if(p.s==='cod'&&S.st!=='cancelled')h+='<div class=m>💵 Cash on delivery</div>';
+  else if(p.s==='refunded')h+='<div class=m>💸 GRAM payment refunded</div>';
+  else if(p.s==='review')h+='<div class=m>⚠️ Payment needs a manual check. We will contact you.</div>';
+  else if(!done&&p.s==='sent')h+='<div class=g>'+p.g+' GRAM</div><p class=m>⏳ Payment sent. Confirming on the blockchain, usually about a minute.</p>'+btn('k','Check status','l');
+  else if(!done&&p.s==='awaiting'){
+    h+='<div class=g>'+p.g+' GRAM</div>';
+    if(left()>0){
+      h+='<div class=m>Price locked for <span id=t>'+clock()+'</span></div>';
+      h+=W.wallet?btn('p','Pay with Wallet'):'<p class=m>Telegram Wallet is not available in this app. Update Telegram or pay cash.</p>';
+    }else h+='<div class=m>This price has expired.</div>'+btn('n','Get a new price');
+    h+=btn('c','Pay cash on delivery instead','l');
+  }
+  if(done){
+    if(ask)h+='<p class=m>Same items to the same address, '+(ask==='g'?'paid with GRAM':'cash on delivery')+'. New prices apply.</p>'+btn('y','Confirm order')+btn('x','Back','l');
+    else{h+=btn('ac','🔁 Order again · cash');if(W.wallet)h+=btn('ag','🔁 Order again · GRAM','l')}
+  }
+  if(note)h+='<div class=m>'+e(note)+'</div>';
+  v.innerHTML=h;
+}
+function take(a){
+  var r=null;try{r=JSON.parse(a&&a.result)}catch(x){}
+  if(r&&r.st){S=r.st;ask=''}
+  note=r&&r.err||'';
+  return r;
+}
+function why(x){
+  var c=x&&x.code;
+  return c==='REJECTED'?'Cancelled in the wallet.':c==='BAD_REQUEST'?'The wallet refused this payment. Get a new price and try again.':c==='TIMEOUT'?'No answer yet. If you already paid, do not pay again: tap Check status.':'Something went wrong. Please try again.';
+}
+function run(q){busy=1;note='Please wait…';render();q.then(null,function(x){note=why(x)}).then(function(){busy=0;render()})}
+v.onclick=function(ev){
+  var id=ev.target&&ev.target.id,o=S.o;
+  if(busy||!id||!o)return;
+  if(id==='p')run(W.request('pay:'+o,{wallet:true}).then(function(a){
+    var r=take(a);
+    if(!r||!r.messages)return;
+    note='Confirm the payment in your wallet…';render();
+    return W.wallet.sendTransaction(r,'paid:'+o).then(take);
+  }));
+  else if(id==='n')run(W.request('new:'+o).then(take));
+  else if(id==='c')run(W.request('cod:'+o).then(take));
+  else if(id==='k')run(W.request('st:'+o).then(take));
+  else if(id==='ac'||id==='ag'){ask=id==='ag'?'g':'c';note='';render()}
+  else if(id==='x'){ask='';render()}
+  else if(id==='y')run(W.request('again:'+o+':'+ask).then(take));
+};
+W.onEvent('chatDataChanged',function(){read();ask='';if(!busy)note='';render()});
+setInterval(function(){
+  if(P().s!=='awaiting'||busy)return;
+  var t=document.getElementById('t');
+  if(t&&left()>0)t.textContent=clock();else if(t)render();
+},1000);
+read();render();W.ready&&W.ready();
+</script>
