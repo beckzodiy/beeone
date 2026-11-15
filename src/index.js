@@ -161,7 +161,7 @@ async function createOrder(env, body, tgUser) {
     // Admin/agent are only told once the payment clears on-chain (see gram.js).
     if (!(await sendGramCheckout(env, order))) {
       await env.DB.prepare('DELETE FROM orders WHERE id = ?').bind(order.id).run();
-      return { error: 'Could not open the GRAM checkout in this chat. Start the bot first, or choose cash on delivery.' };
+      return { error: 'Telegram did not open the GRAM payment widget right now. Please choose cash on delivery, or try again later.' };
     }
   } else {
     await notifyAdmin(env, order, tgUser);

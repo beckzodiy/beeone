@@ -163,16 +163,12 @@ function payMessage(env, o) {
   };
 }
 
-// Opens the GRAM checkout in the customer's chat: the widget if Telegram allows it, else the plain message.
+// Opens the GRAM checkout in the customer's chat as a Telegram widget. No other checkout:
+// if Telegram refuses the widget, the order is not placed.
 export async function sendGramCheckout(env, order) {
   const w = await tg(env, 'sendWidget', buildPayWidgetMessage(order));
-  if (w.ok) {
-    await env.DB.prepare('UPDATE orders SET gram_widget_message_id = ? WHERE id = ?').bind(w.result.message_id, order.id).run();
-    return true;
-  }
-  const m = await tg(env, 'sendMessage', { chat_id: order.user_id, ...payMessage(env, order) });
-  if (!m.ok) return false;
-  await env.DB.prepare('UPDATE orders SET gram_pay_message_id = ? WHERE id = ?').bind(m.result.message_id, order.id).run();
+  if (!w.ok) return false;
+  await env.DB.prepare('UPDATE orders SET gram_widget_message_id = ? WHERE id = ?').bind(w.result.message_id, order.id).run();
   return true;
 }
 
