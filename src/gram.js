@@ -15,6 +15,8 @@ import { beginCell, Address } from '@ton/core';
 import { tg } from './telegram.js';
 import { aed, esc, getAgent, notifyAdmin } from './common.js';
 
+const FINAL_PAID = ['paid', 'overpaid'];
+
 const INVOICE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const randomInvoiceCode = () =>
   [...crypto.getRandomValues(new Uint8Array(6))].map((b) => INVOICE_ALPHABET[b % INVOICE_ALPHABET.length]).join('');
@@ -104,11 +106,173 @@ function widgetState(o) {
   return { s: 'awaiting', g, exp };
 }
 
-async function pushWidgetState(env, o) {
-  if (!o.user_id || !o.gram_widget_message_id) return;
-  await tg(env, 'editMessageWidgetData', {
-    chat_id: o.user_id, message_id: o.gram_widget_message_id, chat_data: JSON.stringify(widgetState(o)),
+// Push the order's payment state to whichever checkout the customer has in the chat.
+async function pushCheckoutState(env, o) {
+  if (!o.user_id) return;
+  if (o.gram_widget_message_id) {
+    await tg(env, 'editMessageWidgetData', {
+      chat_id: o.user_id, message_id: o.gram_widget_message_id, chat_data: JSON.stringify(widgetState(o)),
+    });
+  }
+  if (o.gram_pay_message_id) {
+    await tg(env, 'editMessageText', { chat_id: o.user_id, message_id: o.gram_pay_message_id, ...payMessage(env, o) });
+  }
+}
+
+// ---------- Fallback checkout: a plain message ----------
+// Used when Telegram refuses the widget (sendWidget -> INPUT_MEDIA_WIDGET_NOT_ALLOWED).
+// The customer pays from any TON wallet by address + amount + comment; the
+// poller matches it on-chain exactly as for the widget.
+const exactGram = (n) => { const v = BigInt(n); return `${v / 1_000_000_000n}.${(v % 1_000_000_000n).toString().padStart(9, '0')}`.replace(/\.?0+$/, ''); };
+const friendly = (addr) => { try { return Address.parse(addr).toString({ bounceable: false }); } catch { return addr; } };
+const tonkeeperLink = (to, nanotons, text) =>
+  `https://app.tonkeeper.com/transfer/${friendly(to)}?amount=${nanotons}&text=${encodeURIComponent(text)}`;
+
+function transferButtons(to, nanotons, comment, payLabel) {
+  return [
+    [{ text: payLabel, url: tonkeeperLink(to, nanotons, comment) }],
+    [{ text: 'Copy address', copy_text: { text: friendly(to) } },
+     { text: 'Copy amount', copy_text: { text: exactGram(nanotons) } },
+     { text: 'Copy comment', copy_text: { text: comment } }],
+  ];
+}
+
+function payMessage(env, o) {
+  const head = `💎 <b>Order #${o.id}</b> — ${aed(o.total)}`;
+  const st = widgetState(o).s;
+  if (o.payment_status === 'refunded') return { parse_mode: 'HTML', text: `${head}\n\n💸 Your GRAM payment was refunded.` };
+  if (st === 'paid') return { parse_mode: 'HTML', text: `${head}\n\n✅ <b>Paid ${exactGram(o.paid_amount_nanotons)} GRAM.</b> Thank you! We are preparing your delivery.` };
+  if (st === 'cod') return { parse_mode: 'HTML', text: `${head}\n\n💵 Switched to <b>cash on delivery</b>. Pay the courier when it arrives.` };
+  if (st === 'review') return { parse_mode: 'HTML', text: `${head}\n\n⚠️ We received a payment that does not match this order. We will contact you.` };
+  const exp = new Date(o.quote_expires_at);
+  const cash = [{ text: '💵 Pay cash on delivery instead', callback_data: `gc:${o.gram_invoice_code}` }];
+  if (exp.getTime() <= Date.now()) {
+    return { parse_mode: 'HTML', text: `${head}\n\n⏰ The GRAM price has expired. Get a new price to pay.`,
+      reply_markup: { inline_keyboard: [[{ text: '🔄 Get a new price', callback_data: `gn:${o.gram_invoice_code}` }], cash] } };
+  }
+  const hhmm = exp.toISOString().slice(11, 16);
+  return {
+    parse_mode: 'HTML',
+    text: `${head}\n\nSend exactly <b>${exactGram(o.gram_amount_nanotons)} GRAM</b>\nto <code>${friendly(env.GRAM_MERCHANT_ADDRESS)}</code>\nwith comment <code>${o.gram_invoice_code}</code>\n\n`
+      + `⚠️ The comment is required, without it we cannot match your payment.\nPrice valid until ${hhmm} UTC. We confirm automatically about a minute after you pay.`,
+    reply_markup: { inline_keyboard: [
+      ...transferButtons(env.GRAM_MERCHANT_ADDRESS, o.gram_amount_nanotons, o.gram_invoice_code, '💎 Pay in Tonkeeper'),
+      [{ text: '🔄 Check status', callback_data: `gs:${o.gram_invoice_code}` }],
+      cash,
+    ] },
+  };
+}
+
+// Opens the GRAM checkout in the customer's chat: the widget if Telegram allows it, else the plain message.
+export async function sendGramCheckout(env, order) {
+  const w = await tg(env, 'sendWidget', buildPayWidgetMessage(order));
+  if (w.ok) {
+    await env.DB.prepare('UPDATE orders SET gram_widget_message_id = ? WHERE id = ?').bind(w.result.message_id, order.id).run();
+    return true;
+  }
+  const m = await tg(env, 'sendMessage', { chat_id: order.user_id, ...payMessage(env, order) });
+  if (!m.ok) return false;
+  await env.DB.prepare('UPDATE orders SET gram_pay_message_id = ? WHERE id = ?').bind(m.result.message_id, order.id).run();
+  return true;
+}
+
+async function requote(env, o) {
+  const q = await quoteAmount(env, o.total);
+  await env.DB.prepare(
+    "UPDATE orders SET payment_status = 'awaiting', gram_amount_nanotons = ?, gram_rate_aed = ?, quote_expires_at = ?, gram_claimed_msg_hash = NULL WHERE id = ?"
+  ).bind(q.nanotons, q.rateAedPerGram, q.expiresAt, o.id).run();
+}
+
+async function switchToCod(env, o, from) {
+  await env.DB.prepare("UPDATE orders SET payment_method = 'cod', payment_status = NULL WHERE id = ?").bind(o.id).run();
+  const fresh = await getOrder(env, o.id);
+  await notifyAdmin(env, fresh, from);
+  await notifyAgentOfOrder(env, fresh, '');
+}
+
+// Buttons under the fallback message (customer) and the refund buttons (admin).
+// Returns the toast text, or undefined if the callback is not ours.
+export async function handleGramCallback(env, cq) {
+  const [action, arg] = String(cq.data || '').split(':');
+  const isAdmin = String(cq.from.id) === String(env.ADMIN_ID);
+  if (action === 'rf' || action === 'rfo') return isAdmin ? refundInstructions(env, action, Number(arg)) : 'Admins only';
+  if (!['gc', 'gn', 'gs'].includes(action)) return undefined;
+
+  let o = await env.DB.prepare('SELECT * FROM orders WHERE gram_invoice_code = ?').bind(arg).first();
+  if (!o || o.user_id !== cq.from.id) return 'Order not found';
+  const open = o.payment_method === 'gram' && (o.payment_status === 'awaiting' || o.payment_status === 'expired');
+  let toast = '';
+  if (action === 'gc' && open) { await switchToCod(env, o, cq.from); toast = 'Switched to cash on delivery'; }
+  if (action === 'gn' && open) {
+    try { await requote(env, o); toast = 'New price locked'; } catch (e) { console.error('gram requote failed', e.message); toast = 'Could not get a live price, try again'; }
+  }
+  if (action === 'gs') toast = FINAL_PAID.includes(o.payment_status) ? 'Paid ✅' : 'Not received yet. It can take a minute after you pay.';
+  o = await getOrder(env, o.id);
+  await tg(env, 'editMessageText', { chat_id: cq.message.chat.id, message_id: cq.message.message_id, ...payMessage(env, o) });
+  return toast || 'Updated';
+}
+
+// ---------- Refunds ----------
+// The bot never sends funds: a refund is a ready-made transfer the admin sends
+// from their own wallet. The poller then sees the outgoing transfer with
+// comment "Refund #N" and marks the refund done.
+async function createRefund(env, { orderId = null, to, nanotons, reason, sourceTx = null }) {
+  const r = await env.DB.prepare(
+    'INSERT INTO gram_refunds (order_id, to_address, amount_nanotons, reason, source_tx_hash) VALUES (?, ?, ?, ?, ?)'
+  ).bind(orderId, to, String(nanotons), reason, sourceTx).run();
+  return r.meta.last_row_id;
+}
+
+const refundButton = (id, nanotons) => ({ inline_keyboard: [[{ text: `💸 Refund ${exactGram(nanotons)} GRAM`, callback_data: `rf:${id}` }]] });
+
+async function refundInstructions(env, action, id) {
+  let refund;
+  if (action === 'rfo') {
+    const o = await getOrder(env, id);
+    if (!o || o.payment_method !== 'gram' || !FINAL_PAID.includes(o.payment_status)) return 'Nothing to refund';
+    if (!o.gram_payer_address) return 'Payer address unknown for this order, refund manually';
+    refund = await env.DB.prepare("SELECT * FROM gram_refunds WHERE order_id = ? AND reason = 'order refund'").bind(id).first();
+    if (!refund) {
+      const rid = await createRefund(env, { orderId: id, to: o.gram_payer_address, nanotons: o.paid_amount_nanotons, reason: 'order refund', sourceTx: o.tx_hash });
+      refund = await env.DB.prepare('SELECT * FROM gram_refunds WHERE id = ?').bind(rid).first();
+    }
+  } else {
+    refund = await env.DB.prepare('SELECT * FROM gram_refunds WHERE id = ?').bind(id).first();
+  }
+  if (!refund) return 'Refund not found';
+  if (refund.status === 'sent') return 'Already refunded ✅';
+  const comment = `Refund #${refund.id}`;
+  await tg(env, 'sendMessage', {
+    chat_id: env.ADMIN_ID, parse_mode: 'HTML',
+    text: `💸 <b>Refund #${refund.id}</b>${refund.order_id ? ` — order #${refund.order_id}` : ''} (${esc(refund.reason)})\n\n`
+      + `From the shop wallet, send <b>${exactGram(refund.amount_nanotons)} GRAM</b>\nto <code>${friendly(refund.to_address)}</code>\nwith comment <code>${comment}</code>\n\n`
+      + `Keep the comment: that is how the bot sees the refund went out and tells the customer. The bot never sends funds itself.`,
+    reply_markup: { inline_keyboard: transferButtons(refund.to_address, refund.amount_nanotons, comment, '💸 Send in Tonkeeper') },
   });
+  return 'Refund details sent';
+}
+
+async function processOutgoingTransaction(env, txn) {
+  for (const m of txn.out_msgs || []) {
+    const match = /^Refund #(\d+)\b/.exec((m.message_content?.decoded?.comment || '').trim());
+    if (!match) continue;
+    const refund = await env.DB.prepare('SELECT * FROM gram_refunds WHERE id = ?').bind(Number(match[1])).first();
+    if (!refund || refund.status === 'sent') continue;
+    const admin = (text) => tg(env, 'sendMessage', { chat_id: env.ADMIN_ID, text });
+    let sameDest = false;
+    try { sameDest = Address.parse(m.destination).equals(Address.parse(refund.to_address)); } catch {}
+    if (!sameDest || BigInt(m.value || '0') < BigInt(refund.amount_nanotons)) {
+      await admin(`⚠️ Refund #${refund.id}: a transfer with its comment went out, but to ${friendly(m.destination)} for ${exactGram(m.value || '0')} GRAM, not ${exactGram(refund.amount_nanotons)} GRAM to ${friendly(refund.to_address)}. Not marked as refunded.\ntx ${txn.hash}`);
+      continue;
+    }
+    await env.DB.prepare("UPDATE gram_refunds SET status = 'sent', tx_hash = ?, sent_at = ? WHERE id = ?")
+      .bind(txn.hash, new Date().toISOString(), refund.id).run();
+    await admin(`✅ Refund #${refund.id} sent: ${exactGram(m.value)} GRAM to ${friendly(refund.to_address)}.\ntx ${txn.hash}`);
+    if (!refund.order_id) continue;
+    const o = await getOrder(env, refund.order_id);
+    if (refund.reason === 'order refund') await env.DB.prepare("UPDATE orders SET payment_status = 'refunded' WHERE id = ?").bind(o.id).run();
+    if (o?.user_id) await tg(env, 'sendMessage', { chat_id: o.user_id, text: `💸 We refunded ${exactGram(m.value)} GRAM for order #${o.id} to your wallet.\ntx ${txn.hash}` });
+  }
 }
 
 const getOrder = (env, id) => env.DB.prepare('SELECT * FROM orders WHERE id = ?').bind(id).first();
@@ -211,7 +375,7 @@ export async function handleWidgetQuery(env, wq) {
   const open = o.payment_method === 'gram' && (o.payment_status === 'awaiting' || o.payment_status === 'expired');
   const reply = async (err) => {
     o = await getOrder(env, o.id);
-    await pushWidgetState(env, o);
+    await pushCheckoutState(env, o);
     return answer({ st: widgetState(o), ...(err ? { err } : {}) });
   };
 
@@ -235,10 +399,7 @@ export async function handleWidgetQuery(env, wq) {
 
   if (action === 'new' && open) {
     try {
-      const q = await quoteAmount(env, o.total);
-      await env.DB.prepare(
-        "UPDATE orders SET payment_status = 'awaiting', gram_amount_nanotons = ?, gram_rate_aed = ?, quote_expires_at = ?, gram_claimed_msg_hash = NULL WHERE id = ?"
-      ).bind(q.nanotons, q.rateAedPerGram, q.expiresAt, o.id).run();
+      await requote(env, o);
     } catch (e) {
       console.error('gram requote failed', e.message);
       return reply('Could not get a live price right now. Try again in a moment.');
@@ -247,10 +408,7 @@ export async function handleWidgetQuery(env, wq) {
   }
 
   if (action === 'cod' && open) {
-    await env.DB.prepare("UPDATE orders SET payment_method = 'cod', payment_status = NULL WHERE id = ?").bind(o.id).run();
-    o = await getOrder(env, o.id);
-    await notifyAdmin(env, o, wq.from);
-    await notifyAgentOfOrder(env, o, '');
+    await switchToCod(env, o, wq.from);
     return reply();
   }
 
@@ -281,37 +439,42 @@ async function processIncomingTransaction(env, txn) {
   const got = BigInt(msg.value || '0');
   const txHash = txn.hash;
   const sender = msg.source || 'unknown';
-  const admin = (text) => tg(env, 'sendMessage', { chat_id: env.ADMIN_ID, text });
+  const payer = friendly(sender);
+  const admin = (text, extra = {}) => tg(env, 'sendMessage', { chat_id: env.ADMIN_ID, text, ...extra });
+  // Flag to the admin with a one-tap refund of `amount` back to the sender.
+  const flag = async (text, orderId, amount, reason) => {
+    const rid = await createRefund(env, { orderId, to: sender, nanotons: amount, reason, sourceTx: txHash });
+    return admin(text, { reply_markup: refundButton(rid, amount) });
+  };
   const o = await env.DB.prepare('SELECT * FROM orders WHERE gram_invoice_code = ?').bind(comment).first();
 
-  if (!o) return admin(`⚠️ Unmatched GRAM payment: ${formatNanotons(got)} GRAM from ${sender}, comment "${comment}" matches no order.\ntx ${txHash}`);
-  if (o.payment_method !== 'gram') return admin(`⚠️ GRAM payment for order #${o.id}, which the customer switched to cash on delivery: ${formatNanotons(got)} GRAM from ${sender}. Refund it or treat the order as prepaid.\ntx ${txHash}`);
-  if (o.payment_status === 'paid' || o.payment_status === 'overpaid') return admin(`⚠️ Duplicate GRAM payment for order #${o.id} (already paid): ${formatNanotons(got)} GRAM from ${sender}. Needs a manual refund.\ntx ${txHash}`);
-  if (o.payment_status !== 'awaiting' && o.payment_status !== 'expired') return admin(`⚠️ Another GRAM payment for order #${o.id} (status "${o.payment_status}"): ${formatNanotons(got)} GRAM from ${sender}. Review manually.\ntx ${txHash}`);
+  if (!o) return flag(`⚠️ Unmatched GRAM payment: ${formatNanotons(got)} GRAM from ${payer}, comment "${comment}" matches no order.\ntx ${txHash}`, null, got, 'unmatched payment');
+  if (o.payment_method !== 'gram') return flag(`⚠️ GRAM payment for order #${o.id}, which the customer switched to cash on delivery: ${formatNanotons(got)} GRAM from ${payer}. Refund it, or treat the order as prepaid.\ntx ${txHash}`, o.id, got, 'paid after switching to cash');
+  if (o.payment_status !== 'awaiting' && o.payment_status !== 'expired') return flag(`⚠️ Duplicate GRAM payment for order #${o.id} (status "${o.payment_status}"): ${formatNanotons(got)} GRAM from ${payer}.\ntx ${txHash}`, o.id, got, 'duplicate payment');
 
   const expected = BigInt(o.gram_amount_nanotons);
-  const seen = { paid_amount_nanotons: got.toString(), tx_hash: txHash };
+  const seen = { paid_amount_nanotons: got.toString(), tx_hash: txHash, gram_payer_address: payer };
   let problem;
   // Judge lateness by when the transaction happened on-chain, not by when we polled.
   if (txn.now * 1000 > new Date(o.quote_expires_at).getTime()) {
     await markOrder(env, o.id, 'late', seen);
-    problem = `⏰ Late GRAM payment for order #${o.id}: ${formatNanotons(got)} GRAM from ${sender} arrived after the quote expired (quoted ${formatNanotons(expected)}). Honor it or refund.\ntx ${txHash}`;
+    problem = [`⏰ Late GRAM payment for order #${o.id}: ${formatNanotons(got)} GRAM from ${payer} arrived after the quote expired (quoted ${formatNanotons(expected)}). Honor it (confirm the order) or refund.\ntx ${txHash}`, 'late payment'];
   } else if (got < expected) {
     await markOrder(env, o.id, 'underpaid', seen);
-    problem = `⚠️ Underpaid GRAM order #${o.id}: expected ${formatNanotons(expected)} GRAM, got ${formatNanotons(got)} from ${sender}. Ask for the rest or refund.\ntx ${txHash}`;
+    problem = [`⚠️ Underpaid GRAM order #${o.id}: expected ${formatNanotons(expected)} GRAM, got ${formatNanotons(got)} from ${payer}. Ask for the rest or refund.\ntx ${txHash}`, 'underpaid'];
   } else {
     await markOrder(env, o.id, got > expected ? 'overpaid' : 'paid', { ...seen, paid_at: new Date().toISOString() });
   }
 
   const fresh = await getOrder(env, o.id);
-  await pushWidgetState(env, fresh);
-  if (problem) return admin(problem);
+  await pushCheckoutState(env, fresh);
+  if (problem) return flag(problem[0], o.id, got, problem[1]);
 
   await notifyAdmin(env, fresh, null); // the same "new order" card a cash order gets at once, sent only now that it is paid
-  await admin(`💎 GRAM payment for order #${fresh.id}: ${formatNanotons(got)} GRAM (${aed(fresh.total)}) from ${sender}.\ntx ${txHash}`);
+  await admin(`💎 GRAM payment for order #${fresh.id}: ${formatNanotons(got)} GRAM (${aed(fresh.total)}) from ${payer}.\ntx ${txHash}`);
   await tg(env, 'sendMessage', { chat_id: fresh.user_id, text: `✅ Payment received for order #${fresh.id}. We'll get it ready for delivery!` });
   await notifyAgentOfOrder(env, fresh, ' (paid with GRAM)');
-  if (got > expected) await admin(`💸 Order #${fresh.id} was overpaid by ${formatNanotons(got - expected)} GRAM. Refund the difference to ${sender}.\ntx ${txHash}`);
+  if (got > expected) await flag(`💸 Order #${fresh.id} was overpaid by ${formatNanotons(got - expected)} GRAM.\ntx ${txHash}`, fresh.id, got - expected, 'overpayment');
 }
 
 // Runs every minute (cron trigger in wrangler.toml). Reads the merchant
@@ -347,6 +510,7 @@ export async function pollGramPayments(env) {
   if (!state?.last_lt) return saveCursor(txs[0]?.lt ?? '0', txs[0]?.hash ?? '');
   for (const txn of txs) {
     await processIncomingTransaction(env, txn);
+    await processOutgoingTransaction(env, txn);
     await saveCursor(txn.lt, txn.hash);
   }
 }

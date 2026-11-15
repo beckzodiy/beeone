@@ -4,7 +4,7 @@ import indexHtml from '../public/index.html';
 import { PANTS_L_IMG, PANTS_M_IMG, PANTS_XL_IMG, PANTS_XXL_IMG, PANTS_XXXL_IMG, TAPE_NB_IMG, TAPE_S_IMG, TAPE_M_IMG, TAPE_L_IMG, TAPE_XL_IMG, TAPE_XXL_IMG } from './product-images.js';
 import { tg } from './telegram.js';
 import { aed, esc, getAgent, getAgentByUser, orderText, adminButtons, notifyAdmin } from './common.js';
-import { createGramQuote, buildPayWidgetMessage, handleWidgetQuery, pollGramPayments } from './gram.js';
+import { createGramQuote, sendGramCheckout, handleWidgetQuery, handleGramCallback, pollGramPayments } from './gram.js';
 
 // ---- Catalog: edit names / prices here (server-side prices are the only ones trusted) ----
 const PRODUCTS = [
@@ -159,13 +159,10 @@ async function createOrder(env, body, tgUser) {
   if (paymentMethod === 'gram') {
     // Checkout continues in the chat: the widget shows the order and takes the payment.
     // Admin/agent are only told once the payment clears on-chain (see gram.js).
-    const sent = await tg(env, 'sendWidget', buildPayWidgetMessage(order));
-    if (!sent.ok) {
+    if (!(await sendGramCheckout(env, order))) {
       await env.DB.prepare('DELETE FROM orders WHERE id = ?').bind(order.id).run();
-      return { error: 'Could not open the GRAM checkout in this chat. Update Telegram, or choose cash on delivery.' };
+      return { error: 'Could not open the GRAM checkout in this chat. Start the bot first, or choose cash on delivery.' };
     }
-    await env.DB.prepare('UPDATE orders SET gram_widget_message_id = ? WHERE id = ?').bind(sent.result.message_id, order.id).run();
-    order.gram_widget_message_id = sent.result.message_id;
   } else {
     await notifyAdmin(env, order, tgUser);
     if (agentCode) {
@@ -191,7 +188,7 @@ async function setStatus(env, id, status, cq) {
     await tg(env, 'editMessageText', {
       chat_id: cq.message.chat.id, message_id: cq.message.message_id, parse_mode: 'HTML',
       text: orderText(updated, null, agent),
-      reply_markup: status === 'confirmed' ? adminButtons(id) : undefined,
+      reply_markup: adminButtons(id, updated),
     });
   }
   const msg = { confirmed: '✅ Your order #ID is confirmed. We will deliver soon.',
@@ -215,6 +212,8 @@ async function handleUpdate(env, update) {
 
   if (update.callback_query) {
     const cq = update.callback_query;
+    const gramToast = await handleGramCallback(env, cq);
+    if (gramToast !== undefined) return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: gramToast });
     if (String(cq.from.id) !== String(env.ADMIN_ID)) return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Admins only' });
     const [, id, status] = (cq.data || '').split(':');
     const text = STATUSES.includes(status) ? await setStatus(env, Number(id), status, cq) : 'Unknown action';

@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS orders (
   quote_expires_at      TEXT,                         -- ISO datetime, quote valid until
   gram_claimed_msg_hash TEXT,                         -- msg_hash Telegram reported (untrusted, cross-check only)
   gram_widget_message_id INTEGER,                     -- the checkout widget message in the customer's chat
+  gram_pay_message_id   INTEGER,                      -- fallback checkout message, when Telegram refuses the widget
+  gram_payer_address    TEXT,                         -- wallet the payment came from (refunds go back here)
   paid_amount_nanotons  TEXT,                         -- actual amount matched on-chain
   tx_hash               TEXT,                         -- matched transaction hash (verified via TON API)
   paid_at               TEXT
@@ -66,3 +68,17 @@ CREATE TABLE IF NOT EXISTS gram_poll_state (
   last_hash TEXT
 );
 INSERT OR IGNORE INTO gram_poll_state (id, last_lt, last_hash) VALUES (1, NULL, NULL);
+
+-- GRAM refunds the admin sends by hand from the shop wallet (see migrations/0003_gram_refunds.sql).
+CREATE TABLE IF NOT EXISTS gram_refunds (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id        INTEGER,
+  to_address      TEXT NOT NULL,
+  amount_nanotons TEXT NOT NULL,
+  reason          TEXT NOT NULL,
+  source_tx_hash  TEXT,
+  status          TEXT NOT NULL DEFAULT 'pending', -- pending | sent
+  tx_hash         TEXT,
+  created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+  sent_at         TEXT
+);
